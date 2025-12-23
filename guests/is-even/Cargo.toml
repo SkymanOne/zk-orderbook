@@ -1,0 +1,15 @@
+[package]
+name = "is-even"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+alloy-primitives = { version = "1.0", default-features = false, features = ["rlp", "serde", "std"] }
+alloy-sol-types = { version = "1.0" }
+risc0-zkvm = { version = "3.0", default-features = false, features = ["std"] }
+
+[profile.release]
+debug = 1
+lto = "thin"

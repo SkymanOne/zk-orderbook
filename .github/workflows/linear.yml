@@ -1,0 +1,28 @@
+name: Find or Create Linear Issue for PR
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    types: ["opened", "edited", "reopened", "synchronize"]
+
+permissions:
+  pull-requests: write
+  repository-projects: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-linear-issue-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find or create a Linear Issue
+        uses: risc0/action-find-or-create-linear-issue@risc0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          linear-api-key: ${{ secrets.LINEAR_API_KEY }}
+          linear-team-key: "BM"
+          linear-created-issue-state-id: "7a07543b-1fc1-48d6-ae7a-a6d042564224" # in progress
