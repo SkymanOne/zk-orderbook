@@ -10,9 +10,15 @@ anyhow = { workspace = true }
 boundless-market = { workspace = true }
 bytemuck = { workspace = true }
 clap = { workspace = true }
+csv = "1.3"
 dotenvy = { workspace = true }
 guests = { workspace = true }
+hex = { workspace = true }
+orderbook = { workspace = true }
+risc0-steel = { path = "../lib/boundless/lib/steel/crates/steel", features = ["host"] }
 risc0-zkvm = { workspace = true, default-features = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

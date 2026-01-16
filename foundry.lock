@@ -1,4 +1,10 @@
 {
+  "lib/boundless": {
+    "tag": {
+      "name": "v1.2.0",
+      "rev": "104aac8126248175d45c54b10cbd605062d73dc6"
+    }
+  },
   "lib/risc0-ethereum": {
     "rev": "365e7b2db4f620fa256580c27558d2623362b9ae"
   }

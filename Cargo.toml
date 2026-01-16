@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps", "guests"]
+members = ["apps", "guests", "crates/orderbook"]
 exclude = ["lib"]
 
 [workspace.package]
@@ -10,6 +10,7 @@ edition = "2021"
 [workspace.dependencies]
 # Intra-workspace dependencies
 guests = { path = "./guests" }
+orderbook = { path = "./crates/orderbook" }
 
 # boundless monorepo dependencies.
 boundless-market = { version = "1.0" }

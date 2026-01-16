@@ -1,0 +1,11 @@
+[package]
+name = "orderbook"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alloy-primitives = { version = "1.0", default-features = false, features = ["rlp", "std"] }
+alloy-sol-types = { version = "1.0" }
+sha2 = { version = "0.10" }
+rs_merkle = { version = "1.4" }
+risc0-steel = { path = "../../lib/boundless/lib/steel/crates/steel" }

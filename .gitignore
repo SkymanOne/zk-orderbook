@@ -16,6 +16,13 @@ target/
 .DS_Store
 .idea
 
+# Environment files (may contain private keys)
+.env
+.env.local
+.env.*.local
+
 # Ignore generated files
 contracts/src/ImageID.sol
 contracts/test/Elf.sol
+# Ignore claude settings
+.claude

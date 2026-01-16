@@ -1,89 +1,163 @@
-// Copyright 2024 RISC Zero, Inc.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
+use std::fs::File;
+use std::io::BufReader;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
-use crate::even_number::IEvenNumber::IEvenNumberInstance;
-use alloy::{
-    primitives::{Address, U256},
-    signers::local::PrivateKeySigner,
-    sol_types::SolValue,
+use alloy::primitives::{Address, FixedBytes};
+use alloy::signers::local::PrivateKeySigner;
+use alloy::sol_types::SolValue;
+use anyhow::{Context, Result};
+use boundless_market::{
+    request_builder::RequirementParams, Client, Deployment, GuestEnv, StorageProviderConfig,
 };
-use anyhow::{bail, Context, Result};
-use boundless_market::{Client, Deployment, StorageProviderConfig};
 use clap::Parser;
-use guests::IS_EVEN_ELF;
+use csv::ReaderBuilder;
+use guests::ORDER_BOOK_ELF;
+use orderbook::{
+    build_utxo_merkle_tree, generate_utxo_proof, BatchInput, Order, Side, SolJournal, Utxo,
+    UtxoWithProof,
+};
+use risc0_steel::{
+    ethereum::{EthEvmEnv, ETH_SEPOLIA_CHAIN_SPEC},
+    Contract,
+};
+use serde::{Deserialize, Serialize};
+use tracing_subscriber::{filter::LevelFilter, prelude::*, EnvFilter};
 use url::Url;
 
-/// Timeout for the transaction to be confirmed.
-pub const TX_TIMEOUT: Duration = Duration::from_secs(30);
-
-mod even_number {
-    alloy::sol!(
-        #![sol(rpc, all_derives)]
-        "../contracts/src/IEvenNumber.sol"
-    );
+// Define the OrderBook contract interface for Steel calls
+alloy::sol! {
+    #[sol(rpc)]
+    interface IOrderBook {
+        function utxoMerkleRoot() external view returns (bytes32);
+        function currentBatchIndex() external view returns (uint64);
+    }
 }
 
-/// Arguments of the publisher CLI.
+/// Order Book ZKVM Host CLI - Boundless Market Edition
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version, about = "Order Book ZKVM Prover via Boundless Market")]
 struct Args {
-    /// The number to publish to the EvenNumber contract.
+    /// Path to CSV file containing new orders
     #[clap(short, long)]
-    number: u32,
-    /// URL of the Ethereum RPC endpoint.
-    #[clap(short, long, env)]
+    orders: PathBuf,
+
+    /// Path to JSON file containing existing UTXOs
+    #[clap(short, long)]
+    utxo_file: Option<PathBuf>,
+
+    /// URL of the Ethereum RPC endpoint
+    #[clap(short, long, env = "RPC_URL")]
     rpc_url: Url,
-    /// Private key used to interact with the EvenNumber contract and the Boundless Market.
-    #[clap(long, env)]
+
+    /// Private key used to interact with contracts and Boundless Market
+    #[clap(long, env = "PRIVATE_KEY")]
     private_key: PrivateKeySigner,
-    /// Address of the EvenNumber contract.
-    #[clap(short, long, env)]
-    even_number_address: Address,
-    /// URL where provers can download the program to be proven.
-    #[clap(long, env)]
-    program_url: Option<Url>,
-    /// Submit the request offchain via the provided order stream service url.
-    #[clap(short, long, requires = "order_stream_url")]
-    offchain: bool,
-    /// Configuration for the StorageProvider to use for uploading programs and inputs.
+
+    /// OrderBook contract address
+    #[clap(long, env = "ORDER_BOOK_ADDRESS")]
+    order_book: Address,
+
+    /// Configuration for the StorageProvider to use for uploading programs and inputs
     #[clap(flatten, next_help_heading = "Storage Provider")]
     storage_config: StorageProviderConfig,
-    /// Deployment of the Boundless contracts and services to use.
-    ///
-    /// Will be automatically resolved from the connected chain ID if unspecified.
+
+    /// Boundless Market deployment configuration
     #[clap(flatten, next_help_heading = "Boundless Market Deployment")]
     deployment: Option<Deployment>,
 }
 
+/// Serializable UTXO for JSON storage
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerializableUtxo {
+    id: String,
+    side: String,
+    price: u64,
+    quantity: u64,
+    owner: String,
+    nonce: u64,
+    expiry_batch: u64,
+}
+
+impl From<&Utxo> for SerializableUtxo {
+    fn from(utxo: &Utxo) -> Self {
+        SerializableUtxo {
+            id: format!("0x{}", hex::encode(utxo.id)),
+            side: match utxo.order.side {
+                Side::Buy => "buy".to_string(),
+                Side::Sell => "sell".to_string(),
+            },
+            price: utxo.order.price,
+            quantity: utxo.order.quantity,
+            owner: format!("{}", utxo.order.owner),
+            nonce: utxo.order.nonce,
+            expiry_batch: utxo.order.expiry_batch,
+        }
+    }
+}
+
+impl TryFrom<&SerializableUtxo> for Utxo {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &SerializableUtxo) -> Result<Self, Self::Error> {
+        let id_hex = s.id.strip_prefix("0x").unwrap_or(&s.id);
+        let id_bytes = hex::decode(id_hex)?;
+        let id = FixedBytes::from_slice(&id_bytes);
+
+        let order = Order {
+            side: match s.side.as_str() {
+                "buy" | "Buy" | "BUY" => Side::Buy,
+                "sell" | "Sell" | "SELL" => Side::Sell,
+                _ => anyhow::bail!("Invalid side: {}", s.side),
+            },
+            price: s.price,
+            quantity: s.quantity,
+            owner: s.owner.parse()?,
+            nonce: s.nonce,
+            expiry_batch: s.expiry_batch,
+        };
+
+        Ok(Utxo { id, order })
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    // Initialize logging
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::from_str("info")?.into())
+                .from_env_lossy(),
+        )
         .init();
 
     match dotenvy::dotenv() {
         Ok(path) => tracing::debug!("Loaded environment variables from {:?}", path),
         Err(e) if e.not_found() => tracing::debug!("No .env file found"),
-        Err(e) => bail!("failed to load .env file: {}", e),
+        Err(e) => anyhow::bail!("failed to load .env file: {}", e),
     }
-    let args = Args::parse();
 
-    // Create a Boundless client from the provided parameters.
+    let args = Args::parse();
+    run(args).await
+}
+
+/// Main logic which creates the Boundless client, prepares inputs, and submits the proof request
+async fn run(args: Args) -> Result<()> {
+    // Read batch size from environment (default: 10)
+    let batch_size: usize = std::env::var("BATCH_SIZE")
+        .unwrap_or_else(|_| "10".to_string())
+        .parse()
+        .context("Invalid BATCH_SIZE")?;
+
+    tracing::info!("Batch size: {}", batch_size);
+    tracing::info!("OrderBook contract: {}", args.order_book);
+
+    // Create a Boundless client from the provided parameters
     let client = Client::builder()
-        .with_rpc_url(args.rpc_url)
+        .with_rpc_url(args.rpc_url.clone())
         .with_deployment(args.deployment)
         .with_storage_provider_config(&args.storage_config)?
         .with_private_key(args.private_key)
@@ -91,67 +165,234 @@ async fn main() -> Result<()> {
         .await
         .context("failed to build boundless client")?;
 
-    // Encode the input for the guest program
-    tracing::info!("Number to publish: {}", args.number);
-    let input_bytes = U256::from(args.number).abi_encode();
-
-    // Build the request based on whether program URL is provided
-    let request = if let Some(program_url) = args.program_url {
-        // Use the provided URL
-        client
-            .new_request()
-            .with_program_url(program_url)?
-            .with_stdin(input_bytes.clone())
+    // Load existing UTXOs from JSON file if provided
+    let existing_utxos = if let Some(ref utxo_path) = args.utxo_file {
+        if utxo_path.exists() {
+            let file = File::open(utxo_path)?;
+            let reader = BufReader::new(file);
+            let serializable: Vec<SerializableUtxo> = serde_json::from_reader(reader)?;
+            serializable
+                .iter()
+                .map(|s| Utxo::try_from(s))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        }
     } else {
-        client
-            .new_request()
-            .with_program(IS_EVEN_ELF)
-            .with_stdin(input_bytes)
+        Vec::new()
     };
+    tracing::info!("Loaded {} existing UTXOs", existing_utxos.len());
 
+    // Parse new orders from CSV
+    let new_orders = parse_orders_csv(&args.orders, batch_size)?;
+    tracing::info!("Parsed {} new orders", new_orders.len());
+
+    // Create Steel EVM environment for on-chain state verification
+    tracing::info!("Creating Steel EVM environment...");
+    let mut evm_env = EthEvmEnv::builder()
+        .rpc(args.rpc_url.as_str().parse()?)
+        .chain_spec(&ETH_SEPOLIA_CHAIN_SPEC)
+        .build()
+        .await?;
+
+    // Preflight: query on-chain state via Steel
+    let mut contract = Contract::preflight(args.order_book, &mut evm_env);
+
+    let on_chain_merkle_root = contract
+        .call_builder(&IOrderBook::utxoMerkleRootCall {})
+        .call()
+        .await?;
+    let on_chain_batch_index = contract
+        .call_builder(&IOrderBook::currentBatchIndexCall {})
+        .call()
+        .await?;
+
+    tracing::info!("On-chain batch index: {}", on_chain_batch_index);
+    tracing::info!(
+        "On-chain UTXO Merkle root: 0x{}",
+        hex::encode(on_chain_merkle_root)
+    );
+
+    // Build Merkle tree and proofs for existing UTXOs
+    let (tree, computed_root) = build_utxo_merkle_tree(&existing_utxos);
+
+    // Verify computed root matches on-chain root (for first batch with no UTXOs, both are zero)
+    if existing_utxos.is_empty() {
+        tracing::info!("First batch - no existing UTXOs to verify");
+    } else {
+        assert_eq!(
+            computed_root, on_chain_merkle_root,
+            "Computed Merkle root does not match on-chain root"
+        );
+        tracing::info!("Merkle root verified!");
+    }
+
+    // Build UTXOs with proofs
+    let existing_utxos_with_proofs: Vec<UtxoWithProof> = existing_utxos
+        .iter()
+        .enumerate()
+        .map(|(i, utxo)| {
+            let proof_hashes = generate_utxo_proof(&tree, i).unwrap_or_default();
+            UtxoWithProof {
+                utxo: utxo.clone(),
+                proof_hashes,
+                leaf_index: i,
+            }
+        })
+        .collect();
+
+    // Create batch input
+    let batch_input = BatchInput {
+        batch_index: on_chain_batch_index,
+        utxo_merkle_root: on_chain_merkle_root,
+        existing_utxos_with_proofs,
+        new_orders,
+    };
+    let input_bytes = batch_input.to_sol().abi_encode();
+
+    tracing::info!("Preparing proof request for Boundless Market...");
+
+    // Convert Steel environment to input for guest
+    let evm_input = evm_env.into_input().await?;
+
+    // Build guest environment with all inputs
+    // The guest reads: evm_input, order_book_address, input_bytes
+    let guest_env = GuestEnv::builder()
+        .write(&evm_input)?
+        .write(&args.order_book)?
+        .write(&input_bytes)?;
+
+    // Create a request with a callback to the OrderBook contract
+    let request = client
+        .new_request()
+        .with_program(ORDER_BOOK_ELF)
+        .with_env(guest_env)
+        // Add the callback to the OrderBook contract
+        .with_requirements(
+            RequirementParams::builder()
+                .callback_address(args.order_book)
+                .callback_gas_limit(500_000), // Higher gas limit for order execution
+        );
+
+    // Submit the request to the blockchain
     let (request_id, expires_at) = client.submit_onchain(request).await?;
+    tracing::info!("Submitted proof request {:x}", request_id);
 
-    // Wait for the request to be fulfilled. The market will return the fulfillment.
-    tracing::info!("Waiting for request {:x} to be fulfilled", request_id);
+    // Wait for the request to be fulfilled
+    tracing::info!("Waiting for request {:x} to be fulfilled...", request_id);
     let fulfillment = client
         .wait_for_request_fulfillment(
             request_id,
-            Duration::from_secs(5), // check every 5 seconds
+            Duration::from_secs(10), // check every 10 seconds
             expires_at,
         )
         .await?;
-    tracing::info!("Request {:x} fulfilled", request_id);
+    tracing::info!("Request {:x} fulfilled!", request_id);
 
-    // We interact with the EvenNumber contract by calling the set function with our number and
-    // the seal (i.e. proof) returned by the market.
-    let even_number = IEvenNumberInstance::new(args.even_number_address, client.provider().clone());
-    let call_set = even_number
-        .set(U256::from(args.number), fulfillment.seal)
-        .from(client.caller());
+    // Extract journal from fulfillment and decode
+    let fulfillment_data = fulfillment.data().context("failed to decode fulfillment data")?;
+    let journal_bytes = fulfillment_data
+        .journal()
+        .context("fulfillment has no journal")?;
+    let journal = <SolJournal>::abi_decode(journal_bytes)
+        .context("failed to decode journal")?;
 
-    // By calling the set function, we verify the seal against the published roots
-    // of the SetVerifier contract.
-    tracing::info!("Calling EvenNumber set function");
-    let pending_tx = call_set.send().await.context("failed to broadcast tx")?;
-    tracing::info!("Broadcasting tx {}", pending_tx.tx_hash());
-    let tx_hash = pending_tx
-        .with_timeout(Some(TX_TIMEOUT))
-        .watch()
-        .await
-        .context("failed to confirm tx")?;
-    tracing::info!("Tx {:?} confirmed", tx_hash);
-
-    // Query the value stored at the EvenNumber address to check it was set correctly
-    let number = even_number
-        .get()
-        .call()
-        .await
-        .context("failed to get number from contract")?;
+    tracing::info!("=== Batch Execution Summary ===");
+    tracing::info!("Batch index: {}", journal.batchIndex);
+    tracing::info!("Fills executed: {}", journal.fills.len());
+    tracing::info!("New UTXOs created: {}", journal.newUtxos.len());
+    tracing::info!("UTXOs consumed: {}", journal.consumedUtxoIds.len());
     tracing::info!(
-        "The number variable for contract at address: {:?} is set to {:?}",
-        args.even_number_address,
-        number
+        "New UTXO Merkle root: 0x{}",
+        hex::encode(journal.newUtxoMerkleRoot)
     );
 
+    // Print fill details
+    for (i, fill) in journal.fills.iter().enumerate() {
+        tracing::info!(
+            "Fill {}: {} -> {} @ {} for {} units",
+            i,
+            fill.maker,
+            fill.taker,
+            fill.price,
+            fill.quantity
+        );
+    }
+
+    // Save new UTXOs to file for next batch
+    if let Some(ref utxo_path) = args.utxo_file {
+        let new_utxos: Vec<SerializableUtxo> = journal
+            .newUtxos
+            .iter()
+            .map(|sol_utxo| {
+                let utxo = Utxo::from(sol_utxo);
+                SerializableUtxo::from(&utxo)
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&new_utxos)?;
+        std::fs::write(utxo_path, json)?;
+        tracing::info!("Saved {} new UTXOs to {:?}", new_utxos.len(), utxo_path);
+    }
+
+    tracing::info!("Order book batch processed successfully via Boundless Market!");
+
     Ok(())
+}
+
+/// Parse orders from CSV file
+fn parse_orders_csv(path: &PathBuf, limit: usize) -> Result<Vec<Order>> {
+    let file = File::open(path)?;
+    let mut reader = ReaderBuilder::new().has_headers(true).from_reader(file);
+
+    let mut orders = Vec::new();
+    let mut nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos() as u64;
+
+    for result in reader.records().take(limit) {
+        let record = result?;
+
+        let side = match record.get(0).context("Missing side")? {
+            "buy" | "Buy" | "BUY" => Side::Buy,
+            "sell" | "Sell" | "SELL" => Side::Sell,
+            s => anyhow::bail!("Invalid side: {}", s),
+        };
+
+        let price: u64 = record
+            .get(1)
+            .context("Missing price")?
+            .parse()
+            .context("Invalid price")?;
+
+        let quantity: u64 = record
+            .get(2)
+            .context("Missing quantity")?
+            .parse()
+            .context("Invalid quantity")?;
+
+        let owner: Address = record
+            .get(3)
+            .context("Missing owner")?
+            .parse()
+            .context("Invalid owner address")?;
+
+        let expiry_batch: u64 = record
+            .get(4)
+            .context("Missing expiry_batch")?
+            .parse()
+            .context("Invalid expiry_batch")?;
+
+        orders.push(Order {
+            side,
+            price,
+            quantity,
+            owner,
+            nonce,
+            expiry_batch,
+        });
+
+        nonce += 1;
+    }
+
+    Ok(orders)
 }
