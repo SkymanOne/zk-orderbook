@@ -23,11 +23,14 @@ contract OrderBook is IOrderBook, BoundlessMarketCallback {
     /// @notice Current batch index (incremented after each batch execution)
     uint64 public currentBatchIndex;
 
-    /// @notice Merkle root of valid UTXOs
+    /// @notice Merkle root of valid Order UTXOs
     bytes32 public utxoMerkleRoot;
 
-    /// @notice Mapping of valid UTXO IDs (kept for backwards compatibility)
-    mapping(bytes32 => bool) public validUtxos;
+    /// @notice Mapping to track verified proofs.
+    /// @dev This is used to prevent a callback is called more than once with the same proof.
+    mapping(bytes32 => bool) public verified;
+
+    error AlreadyVerified();
 
     /// @notice Fill data struct from journal
     struct FillData {
@@ -67,13 +70,9 @@ contract OrderBook is IOrderBook, BoundlessMarketCallback {
     /// @param imageId Image ID of the order book guest program
     /// @param _assetA ERC20 token A (base token)
     /// @param _assetB ERC20 token B (quote token)
-    constructor(
-        IRiscZeroVerifier verifier,
-        address boundlessMarket,
-        bytes32 imageId,
-        IERC20 _assetA,
-        IERC20 _assetB
-    ) BoundlessMarketCallback(verifier, boundlessMarket, imageId) {
+    constructor(IRiscZeroVerifier verifier, address boundlessMarket, bytes32 imageId, IERC20 _assetA, IERC20 _assetB)
+        BoundlessMarketCallback(verifier, boundlessMarket, imageId)
+    {
         ASSET_A = _assetA;
         ASSET_B = _assetB;
         currentBatchIndex = 0;
@@ -81,7 +80,22 @@ contract OrderBook is IOrderBook, BoundlessMarketCallback {
 
     /// @notice Internal handler for proof delivery from Boundless Market
     /// @param journalData The ABI-encoded Journal from ZKVM
-    function _handleProof(bytes32, bytes calldata journalData, bytes calldata) internal override {
+    function _handleProof(bytes32, bytes calldata journalData, bytes calldata seal) internal override {
+        // Since a callback can be triggered by any requestor sending a valid request to the Boundless Market,
+        // we need to perform some checks on the proof before proceeding.
+        // First, the validation of the proof (e.g., seal is valid, the caller of the callback is the BoundlessMarket)
+        // is done in the parent contract, the `BoundlessMarketCallback`.
+        // Here we can add additional checks if needed.
+        // For example, we can check if the proof has already been verified,
+        // so that the same proof cannot be used more than once to run the callback logic.
+        // can't use assembly since data is of variable size. May optimise later
+        bytes32 journalAndSeal = keccak256(abi.encode(journalData, seal));
+        if (verified[journalAndSeal]) {
+            revert AlreadyVerified();
+        }
+        // Mark the proof as verified.
+        verified[journalAndSeal] = true;
+
         // Decode the journal
         Journal memory journal = abi.decode(journalData, (Journal));
 
@@ -91,13 +105,9 @@ contract OrderBook is IOrderBook, BoundlessMarketCallback {
         // Verify batch index matches (replay protection)
         require(journal.batchIndex == currentBatchIndex, "OrderBook: invalid batch index");
 
-        // Process consumed UTXOs
+        // Emit events for consumed UTXOs
         for (uint256 i = 0; i < journal.consumedUtxoIds.length; i++) {
-            bytes32 utxoId = journal.consumedUtxoIds[i];
-            if (validUtxos[utxoId]) {
-                validUtxos[utxoId] = false;
-                emit UTXOConsumed(utxoId);
-            }
+            emit UTXOConsumed(journal.consumedUtxoIds[i]);
         }
 
         // Process fills - execute ERC20 transfers
@@ -106,11 +116,9 @@ contract OrderBook is IOrderBook, BoundlessMarketCallback {
             _executeFill(fill);
         }
 
-        // Process new UTXOs
+        // Emit events for new UTXOs
         for (uint256 i = 0; i < journal.newUtxos.length; i++) {
-            bytes32 utxoId = journal.newUtxos[i].id;
-            validUtxos[utxoId] = true;
-            emit UTXOCreated(utxoId);
+            emit UTXOCreated(journal.newUtxos[i].id);
         }
 
         // Update UTXO Merkle root
@@ -146,19 +154,8 @@ contract OrderBook is IOrderBook, BoundlessMarketCallback {
         }
 
         emit Fill(
-            fill.makerUtxoId,
-            fill.takerUtxoId,
-            fill.price,
-            fill.quantity,
-            fill.maker,
-            fill.taker,
-            fill.makerIsSeller
+            fill.makerUtxoId, fill.takerUtxoId, fill.price, fill.quantity, fill.maker, fill.taker, fill.makerIsSeller
         );
-    }
-
-    /// @inheritdoc IOrderBook
-    function isUtxoValid(bytes32 utxoId) external view returns (bool) {
-        return validUtxos[utxoId];
     }
 
     /// @inheritdoc IOrderBook

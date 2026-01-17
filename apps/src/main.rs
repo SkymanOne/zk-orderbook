@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use alloy::primitives::{Address, FixedBytes};
+use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolValue;
 use anyhow::{Context, Result};
@@ -40,11 +40,11 @@ alloy::sol! {
 #[clap(author, version, about = "Order Book ZKVM Prover via Boundless Market")]
 struct Args {
     /// Path to CSV file containing new orders
-    #[clap(short, long)]
+    #[clap(short, long, env = "ORDERS", default_value = "orders.csv")]
     orders: PathBuf,
 
     /// Path to JSON file containing existing UTXOs
-    #[clap(short, long)]
+    #[clap(short, long, env = "UTXO_FILE", default_value = "utxos.json")]
     utxo_file: Option<PathBuf>,
 
     /// URL of the Ethereum RPC endpoint
@@ -101,10 +101,6 @@ impl TryFrom<&SerializableUtxo> for Utxo {
     type Error = anyhow::Error;
 
     fn try_from(s: &SerializableUtxo) -> Result<Self, Self::Error> {
-        let id_hex = s.id.strip_prefix("0x").unwrap_or(&s.id);
-        let id_bytes = hex::decode(id_hex)?;
-        let id = FixedBytes::from_slice(&id_bytes);
-
         let order = Order {
             side: match s.side.as_str() {
                 "buy" | "Buy" | "BUY" => Side::Buy,
@@ -118,7 +114,8 @@ impl TryFrom<&SerializableUtxo> for Utxo {
             expiry_batch: s.expiry_batch,
         };
 
-        Ok(Utxo { id, order })
+        // Always compute ID from order data to ensure consistency
+        Ok(Utxo::new(order))
     }
 }
 
@@ -271,12 +268,16 @@ async fn run(args: Args) -> Result<()> {
         .with_requirements(
             RequirementParams::builder()
                 .callback_address(args.order_book)
-                .callback_gas_limit(500_000), // Higher gas limit for order execution
+                .callback_gas_limit(15_500_000), // Higher gas limit for order execution
         );
 
     // Submit the request to the blockchain
     let (request_id, expires_at) = client.submit_onchain(request).await?;
-    tracing::info!("Submitted proof request {:x}", request_id);
+    tracing::info!(
+        "Submitted proof request {:x} with callback to {}",
+        request_id,
+        args.order_book
+    );
 
     // Wait for the request to be fulfilled
     tracing::info!("Waiting for request {:x} to be fulfilled...", request_id);
@@ -290,12 +291,13 @@ async fn run(args: Args) -> Result<()> {
     tracing::info!("Request {:x} fulfilled!", request_id);
 
     // Extract journal from fulfillment and decode
-    let fulfillment_data = fulfillment.data().context("failed to decode fulfillment data")?;
+    let fulfillment_data = fulfillment
+        .data()
+        .context("failed to decode fulfillment data")?;
     let journal_bytes = fulfillment_data
         .journal()
         .context("fulfillment has no journal")?;
-    let journal = <SolJournal>::abi_decode(journal_bytes)
-        .context("failed to decode journal")?;
+    let journal = <SolJournal>::abi_decode(journal_bytes).context("failed to decode journal")?;
 
     tracing::info!("=== Batch Execution Summary ===");
     tracing::info!("Batch index: {}", journal.batchIndex);
@@ -345,6 +347,8 @@ fn parse_orders_csv(path: &PathBuf, limit: usize) -> Result<Vec<Order>> {
     let mut reader = ReaderBuilder::new().has_headers(true).from_reader(file);
 
     let mut orders = Vec::new();
+    // good enough for PoC
+    // TODO: use on-chain nonce
     let mut nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos() as u64;
@@ -395,4 +399,168 @@ fn parse_orders_csv(path: &PathBuf, limit: usize) -> Result<Vec<Order>> {
     }
 
     Ok(orders)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::sol_types::SolValue;
+    use risc0_zkvm::{default_executor, ExecutorEnv};
+
+    /// Benchmark test that measures ZKVM cycle count for order matching
+    /// Uses the same 8 orders as in orders.csv
+    ///
+    /// Run with: cargo test --release benchmark_cycle_count -- --nocapture
+    /// Requires RPC_URL and ORDER_BOOK_ADDRESS environment variables
+    #[tokio::test]
+    async fn benchmark_cycle_count() -> Result<()> {
+        // Load environment
+        dotenvy::dotenv().ok();
+
+        let rpc_url: Url = std::env::var("RPC_URL")
+            .context("RPC_URL not set")?
+            .parse()?;
+        let order_book_address: Address = std::env::var("ORDER_BOOK_ADDRESS")
+            .context("ORDER_BOOK_ADDRESS not set")?
+            .parse()?;
+
+        println!("Benchmarking with OrderBook: {}", order_book_address);
+        println!("RPC URL: {}", rpc_url);
+
+        // Create the same 8 orders as in orders.csv
+        let base_nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos() as u64;
+
+        let alice: Address = "0x853e3dC3005b83db47B21d6532F3c5500E970d8F".parse()?;
+        let bob: Address = "0xf841c5bba73Fa25AE775B0a3a2D816d06B044070".parse()?;
+
+        let new_orders = vec![
+            Order {
+                side: Side::Buy,
+                price: 105,
+                quantity: 100,
+                owner: alice,
+                nonce: base_nonce,
+                expiry_batch: 100,
+            },
+            Order {
+                side: Side::Buy,
+                price: 103,
+                quantity: 50,
+                owner: alice,
+                nonce: base_nonce + 1,
+                expiry_batch: 100,
+            },
+            Order {
+                side: Side::Buy,
+                price: 100,
+                quantity: 200,
+                owner: alice,
+                nonce: base_nonce + 2,
+                expiry_batch: 50,
+            },
+            Order {
+                side: Side::Sell,
+                price: 99,
+                quantity: 75,
+                owner: bob,
+                nonce: base_nonce + 3,
+                expiry_batch: 100,
+            },
+            Order {
+                side: Side::Sell,
+                price: 101,
+                quantity: 150,
+                owner: bob,
+                nonce: base_nonce + 4,
+                expiry_batch: 100,
+            },
+            Order {
+                side: Side::Sell,
+                price: 104,
+                quantity: 80,
+                owner: bob,
+                nonce: base_nonce + 5,
+                expiry_batch: 100,
+            },
+            Order {
+                side: Side::Buy,
+                price: 102,
+                quantity: 60,
+                owner: alice,
+                nonce: base_nonce + 6,
+                expiry_batch: 100,
+            },
+            Order {
+                side: Side::Sell,
+                price: 100,
+                quantity: 40,
+                owner: bob,
+                nonce: base_nonce + 7,
+                expiry_batch: 100,
+            },
+        ];
+
+        println!("Created {} orders for benchmark", new_orders.len());
+
+        // Create Steel EVM environment
+        let mut evm_env = EthEvmEnv::builder()
+            .rpc(rpc_url.as_str().parse()?)
+            .chain_spec(&ETH_SEPOLIA_CHAIN_SPEC)
+            .build()
+            .await?;
+
+        // Preflight: query on-chain state
+        let mut contract = Contract::preflight(order_book_address, &mut evm_env);
+        let on_chain_merkle_root = contract
+            .call_builder(&IOrderBook::utxoMerkleRootCall {})
+            .call()
+            .await?;
+        let on_chain_batch_index = contract
+            .call_builder(&IOrderBook::currentBatchIndexCall {})
+            .call()
+            .await?;
+
+        println!("On-chain batch index: {}", on_chain_batch_index);
+        println!(
+            "On-chain UTXO Merkle root: 0x{}",
+            hex::encode(on_chain_merkle_root)
+        );
+
+        // Create batch input (no existing UTXOs for simplicity)
+        let batch_input = BatchInput {
+            batch_index: on_chain_batch_index,
+            utxo_merkle_root: on_chain_merkle_root,
+            existing_utxos_with_proofs: vec![],
+            new_orders,
+        };
+        let input_bytes = batch_input.to_sol().abi_encode();
+
+        // Convert Steel environment to input
+        let evm_input = evm_env.into_input().await?;
+
+        // Build executor environment
+        let env = ExecutorEnv::builder()
+            .write(&evm_input)?
+            .write(&order_book_address)?
+            .write(&input_bytes)?
+            .build()?;
+
+        // Run the executor and measure cycles
+        println!("\nRunning executor...");
+        let exec = default_executor();
+        let session = exec.execute(env, ORDER_BOOK_ELF)?;
+
+        let total_cycles = session.cycles();
+        let segments = session.segments.len();
+
+        println!("\n=== Benchmark Results ===");
+        println!("Total cycles: {}", total_cycles);
+        println!("Segments: {}", segments);
+        println!("Orders processed: 8");
+        println!("Cycles per order: {}", total_cycles / 8);
+
+        Ok(())
+    }
 }

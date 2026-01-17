@@ -1,102 +1,81 @@
-# Boundless Foundry Template
+# ZKVM Order Book
 
-This template serves as a starter app powered by verifiable compute via [Boundless](https://docs.beboundless.xyz). 
+A proof of concept limit order book where order matching is executed off chain inside a RISC Zero ZKVM guest program and verified on chain through Boundless Market.
 
-It is built around a simple smart contract, `EvenNumber` deployed on Sepolia, and its associated RISC Zero guest, `is-even`. To get you started, we have deployed to [EvenNumber contract](https://sepolia.etherscan.io/address/0xE819474E78ad6e1C720a21250b9986e1f6A866A3#code) to Sepolia; we have also pre-uploaded the `is-even` guest to IPFS.
+## Overview
 
-## Quick-start
+Traditional on chain order books are expensive because every match requires multiple storage writes and token transfers. This PoC moves the matching logic off chain while preserving trustlessness through zero knowledge proofs.
 
-1. [Install RISC Zero](https://dev.risczero.com/api/zkvm/install)
+The matching engine runs inside a ZKVM guest program. It takes a batch of orders, runs price-time priority matching, and outputs the fills. A risc0 proof attests that the matching was done correctly. The proof is submitted to the OrderBook smart contract which then executes the ERC20 transfers.
 
-   ```sh
-   curl -L https://risczero.com/install | bash
-   rzup install
-   ```
+## Architecture
 
-2. Clone this repo
+The system has three main components.
 
-   You can clone this repo with `git`, or use `forge init`:
+**Guest Program** processes batches of orders inside the ZKVM. It verifies Merkle proofs for existing orders, runs the matching algorithm, and commits the results to a journal. Steel is used to read on chain state and ensure the proof is anchored to a specific block.
 
-   ```bash
-   forge init --template https://github.com/boundless-xyz/boundless-foundry-template boundless-foundry-template
-   ```
-3. Set up your environment variables
+**OrderBook Contract** receives proofs through Boundless Market callbacks. It validates the Steel commitment, verifies the batch index for replay protection, and executes token transfers for each fill. The contract maintains a Merkle root of all unfilled orders.
 
-   Export your Sepolia wallet private key as an environment variable (making sure it has enough funds):
+**Host Application** coordinates the flow. It reads orders from a CSV file, queries on chain state, builds the guest input with Merkle proofs, and submits proof requests to Boundless Market.
 
-   ```bash
-   export RPC_URL="https://ethereum-sepolia-rpc.publicnode.com"
-   export PRIVATE_KEY="YOUR_PRIVATE_KEY"
-   ```
+## UTXO Model
 
-   You'll also need a deployment of the [EvenNumber contract](./contracts/src/EvenNumber.sol).
-   You can use a predeployed contract on Sepolia:
+Orders are represented as UTXOs. Each order gets a unique ID derived from hashing its fields. When an order is partially filled, the original UTXO is consumed and a new one is created with the remaining quantity. This model allows the ZKVM to operate statelessly since it only needs Merkle proofs to verify existing orders rather than reading the full order book.
 
-   ```bash
-   export EVEN_NUMBER_ADDRESS="0xE819474E78ad6e1C720a21250b9986e1f6A866A3"
-   ```
+## Order Matching
 
-4. Run the example app
+The matching engine implements standard price time priority. Buy orders are sorted by price descending then by nonce ascending. Sell orders are sorted by price ascending then by nonce ascending. Orders cross when the best buy price meets or exceeds the best sell price. The execution price is the maker price. Self trading is prevented by skipping matches where both sides have the same owner.
 
-   The [example app](apps/src/main.rs) will submit a request to the market for a proof that "4" is an even number, wait for the request to be fulfilled, and then submit that proof to the EvenNumber contract, setting the value to "4".
+## Proof Flow
 
-   To run the example using the pre-uploaded zkVM guest:
+1. Host fetches current batch index and UTXO Merkle root from the contract
+2. Host builds Merkle proofs for any existing UTXOs being included
+3. Host creates Steel EVM input anchored to current block
+4. Guest verifies on chain state matches input via Steel
+5. Guest verifies Merkle proofs for existing UTXOs
+6. Guest runs matching and outputs fills and new UTXOs
+7. Proof is generated and submitted to Boundless Market
+8. Boundless Market calls back to OrderBook contract with a proof and a journal
+9. Contract validates proof and executes ERC20 transfers
 
-   ```bash
-   RUST_LOG=info cargo run --bin app -- --number 4 --program-url https://plum-accurate-weasel-904.mypinata.cloud/ipfs/QmU7eqsYWguHCYGQzcg42faQQkgRfWScig7BcsdM1sJciw
-   ```
-## Development
+## Benchmarks
 
-### Build
-
-To build the example run:
-
+A rough cycle benchmark for 8 orders:
 ```
-forge build
-cargo build
+Total cycles: 1345806
+Segments: 2
+Orders processed: 8
+Cycles per order: 168225
 ```
 
-### Test
+## Running
 
-Test the Solidity smart contracts with:
+Set environment variables in a `.env` file, follow `example.env` for guidance.
+
+Deploy contracts.
 
 ```bash
-forge test -vvv
+just deploy-sepolia
 ```
 
-Test the Rust code including the guest with:
+Submit a batch of orders.
 
 ```bash
-cargo test
+cargo run --bin app -- --order-book YOUR_ORDER_BOOK_ADDRESS
 ```
 
-### Deploying the EvenNumber contract
-
-You can deploy your smart contracts using forge script. To deploy the `EvenNumber` contract, run:
-
-```
-VERIFIER_ADDRESS="0x925d8331ddc0a1F0d96E68CF073DFE1d92b69187" forge script contracts/scripts/Deploy.s.sol --rpc-url ${RPC_URL:?} --broadcast -vv
-export EVEN_NUMBER_ADDRESS=# address from the logs the script.
-```
-
-This will use the locally build guest binary, which you will need to upload using the steps below.
-
-### Uploading your own guest program
-
-When you modify your program, you'll need to upload your program to a public URL.
-You can use any file hosting service, and the Boundless SDK provides built-in support uploading to AWS S3, and to IPFS via [Pinata](https://www.pinata.cloud/).
-
-If you'd like to upload your program automatically using Pinata:
+Run the cycle count benchmark.
 
 ```bash
-# The JWT from your Pinata account: https://app.pinata.cloud/developers/api-keys
-export PINATA_JWT="YOUR_PINATA_JWT"
+ORDER_BOOK_ADDRESS=YOUR_ADDRESS cargo test --release -p app benchmark_cycle_count -- --nocapture
 ```
 
-Then run without the `--program-url` flag:
+## Limitations
 
-```bash
-RUST_LOG=info cargo run --bin app -- --number 4
-```
+This is a proof of concept with several limitations:
 
-You can also upload your program to any public URL ahead of time, and supply the URL via the `--program-url` flag.
+- Nonces are generated from timestamps rather than a proper on chain counter. In production orders would need verifiable unique identifiers.
+- The Merkle tree implementation stores all UTXOs in memory. A production system would need a persistent indexed data structure.
+- There is no fee mechanism. Real order books charge maker and taker fees.
+- Batch size is fixed. Dynamic batching based on gas costs and proof generation time would be needed.
+- The system only supports a single orderbook instance. Supporting multiple pairs would require additional contract logic such as factory. The guest code should also be adapted to support.

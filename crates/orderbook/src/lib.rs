@@ -1,25 +1,34 @@
 use alloy_primitives::{Address, FixedBytes};
 use alloy_sol_types::sol;
+use core::cmp::Ordering;
+pub use risc0_steel::Commitment;
 use rs_merkle::{algorithms::Sha256 as MerkleSha256, MerkleProof, MerkleTree};
 use sha2::{Digest, Sha256};
-
-// Re-export Commitment so sol! macro can resolve Steel.Commitment
-#[allow(non_snake_case)]
-mod Steel {
-    pub use risc0_steel::Commitment;
-}
-
-// Re-export Commitment for external use
-pub use risc0_steel::Commitment;
-
-/// Re-export MerkleProof for external use
-pub use rs_merkle::MerkleProof as RsMerkleProof;
 
 /// Order side: Buy or Sell
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Buy,
     Sell,
+}
+
+impl From<Side> for u8 {
+    fn from(value: Side) -> Self {
+        match value {
+            Side::Buy => 0,
+            Side::Sell => 1,
+        }
+    }
+}
+
+impl From<u8> for Side {
+    fn from(value: u8) -> Self {
+        if value == 0 {
+            Side::Buy
+        } else {
+            Self::Sell
+        }
+    }
 }
 
 /// A limit order
@@ -43,7 +52,7 @@ impl Order {
     /// Compute the UTXO ID for this order (hash of all fields)
     pub fn compute_utxo_id(&self) -> FixedBytes<32> {
         let mut hasher = Sha256::new();
-        hasher.update([self.side as u8]);
+        hasher.update([self.side.into()]);
         hasher.update(self.price.to_le_bytes());
         hasher.update(self.quantity.to_le_bytes());
         hasher.update(self.owner.as_slice());
@@ -251,7 +260,7 @@ sol! {
     /// Journal struct that includes Steel commitment and batch output
     /// This is the actual structure committed to the journal and decoded by the contract
     struct SolJournal {
-        Steel.Commitment steelCommitment;
+        Commitment steelCommitment;
         uint64 batchIndex;
         SolFill[] fills;
         SolUtxo[] newUtxos;
@@ -263,7 +272,7 @@ sol! {
 impl From<&Order> for SolOrder {
     fn from(order: &Order) -> Self {
         SolOrder {
-            side: order.side as u8,
+            side: order.side.into(),
             price: order.price,
             quantity: order.quantity,
             owner: order.owner,
@@ -276,7 +285,7 @@ impl From<&Order> for SolOrder {
 impl From<&SolOrder> for Order {
     fn from(sol: &SolOrder) -> Self {
         Order {
-            side: if sol.side == 0 { Side::Buy } else { Side::Sell },
+            side: sol.side.into(),
             price: sol.price,
             quantity: sol.quantity,
             owner: sol.owner,
@@ -290,7 +299,7 @@ impl From<&Utxo> for SolUtxo {
     fn from(utxo: &Utxo) -> Self {
         SolUtxo {
             id: utxo.id,
-            side: utxo.order.side as u8,
+            side: utxo.order.side.into(),
             price: utxo.order.price,
             quantity: utxo.order.quantity,
             owner: utxo.order.owner,
@@ -303,7 +312,7 @@ impl From<&Utxo> for SolUtxo {
 impl From<&SolUtxo> for Utxo {
     fn from(sol: &SolUtxo) -> Self {
         let order = Order {
-            side: if sol.side == 0 { Side::Buy } else { Side::Sell },
+            side: sol.side.into(),
             price: sol.price,
             quantity: sol.quantity,
             owner: sol.owner,
@@ -332,7 +341,7 @@ impl From<&UtxoWithProof> for SolUtxoWithProof {
     fn from(uwp: &UtxoWithProof) -> Self {
         SolUtxoWithProof {
             id: uwp.utxo.id,
-            side: uwp.utxo.order.side as u8,
+            side: uwp.utxo.order.side.into(),
             price: uwp.utxo.order.price,
             quantity: uwp.utxo.order.quantity,
             owner: uwp.utxo.order.owner,
@@ -351,7 +360,7 @@ impl From<&UtxoWithProof> for SolUtxoWithProof {
 impl From<&SolUtxoWithProof> for UtxoWithProof {
     fn from(sol: &SolUtxoWithProof) -> Self {
         let order = Order {
-            side: if sol.side == 0 { Side::Buy } else { Side::Sell },
+            side: sol.side.into(),
             price: sol.price,
             quantity: sol.quantity,
             owner: sol.owner,
@@ -432,22 +441,16 @@ impl BatchOutput {
     }
 }
 
-/// Internal order entry for tracking during matching
-#[derive(Clone)]
-struct OrderEntry {
-    utxo_id: FixedBytes<32>,
-    order: Order,
-}
-
 /// Main order matching function - runs the limit order book matching algorithm
 pub fn match_orders(input: BatchInput) -> BatchOutput {
-    use core::cmp::Ordering;
-
     let current_batch = input.batch_index;
 
-    let mut buy_orders: Vec<OrderEntry> = Vec::new();
-    let mut sell_orders: Vec<OrderEntry> = Vec::new();
+    let mut buy_orders: Vec<Utxo> = Vec::new();
+    let mut sell_orders: Vec<Utxo> = Vec::new();
     let mut consumed_utxo_ids: Vec<FixedBytes<32>> = Vec::new();
+
+    // Track existing UTXO IDs (these must be consumed when filled, even partially)
+    let mut existing_utxo_ids: Vec<FixedBytes<32>> = Vec::new();
 
     // Total UTXO count for Merkle proof verification (derived from input)
     let utxo_count = input.existing_utxos_with_proofs.len();
@@ -467,14 +470,11 @@ pub fn match_orders(input: BatchInput) -> BatchOutput {
             continue;
         }
 
-        let entry = OrderEntry {
-            utxo_id: utxo.id,
-            order: utxo.order,
-        };
+        existing_utxo_ids.push(utxo.id);
 
-        match entry.order.side {
-            Side::Buy => buy_orders.push(entry),
-            Side::Sell => sell_orders.push(entry),
+        match utxo.order.side {
+            Side::Buy => buy_orders.push(utxo),
+            Side::Sell => sell_orders.push(utxo),
         }
     }
 
@@ -485,14 +485,10 @@ pub fn match_orders(input: BatchInput) -> BatchOutput {
         }
 
         let utxo = Utxo::new(order);
-        let entry = OrderEntry {
-            utxo_id: utxo.id,
-            order: utxo.order,
-        };
 
-        match entry.order.side {
-            Side::Buy => buy_orders.push(entry),
-            Side::Sell => sell_orders.push(entry),
+        match utxo.order.side {
+            Side::Buy => buy_orders.push(utxo),
+            Side::Sell => sell_orders.push(utxo),
         }
     }
 
@@ -521,6 +517,17 @@ pub fn match_orders(input: BatchInput) -> BatchOutput {
             break;
         }
 
+        // Prevent self-trading (same owner on both sides)
+        if buy.order.owner == sell.order.owner {
+            // Skip this pair - advance the newer order (higher nonce)
+            if buy.order.nonce > sell.order.nonce {
+                buy_idx += 1;
+            } else {
+                sell_idx += 1;
+            }
+            continue;
+        }
+
         // Determine maker (older order by nonce) for price execution
         let (maker, taker, maker_is_seller) = if buy.order.nonce < sell.order.nonce {
             (buy, sell, false)
@@ -532,8 +539,8 @@ pub fn match_orders(input: BatchInput) -> BatchOutput {
         let fill_qty = buy.order.quantity.min(sell.order.quantity);
 
         let fill = Fill {
-            maker_utxo_id: maker.utxo_id,
-            taker_utxo_id: taker.utxo_id,
+            maker_utxo_id: maker.id,
+            taker_utxo_id: taker.id,
             price: exec_price,
             quantity: fill_qty,
             maker: maker.order.owner,
@@ -545,15 +552,21 @@ pub fn match_orders(input: BatchInput) -> BatchOutput {
         let buy_remaining = buy.order.quantity - fill_qty;
         let sell_remaining = sell.order.quantity - fill_qty;
 
+        // Consume existing UTXOs on any fill (partial or full)
+        if existing_utxo_ids.contains(&buy.id) && !consumed_utxo_ids.contains(&buy.id) {
+            consumed_utxo_ids.push(buy.id);
+        }
+        if existing_utxo_ids.contains(&sell.id) && !consumed_utxo_ids.contains(&sell.id) {
+            consumed_utxo_ids.push(sell.id);
+        }
+
         if buy_remaining == 0 {
-            consumed_utxo_ids.push(buy.utxo_id);
             buy_idx += 1;
         } else {
             buy_orders[buy_idx].order.quantity = buy_remaining;
         }
 
         if sell_remaining == 0 {
-            consumed_utxo_ids.push(sell.utxo_id);
             sell_idx += 1;
         } else {
             sell_orders[sell_idx].order.quantity = sell_remaining;
@@ -563,14 +576,12 @@ pub fn match_orders(input: BatchInput) -> BatchOutput {
     // Collect remaining orders as new UTXOs
     let mut new_utxos: Vec<Utxo> = Vec::new();
 
-    for entry in buy_orders.into_iter().skip(buy_idx) {
-        let utxo = Utxo::new(entry.order);
-        new_utxos.push(utxo);
+    for utxo in buy_orders.into_iter().skip(buy_idx) {
+        new_utxos.push(Utxo::new(utxo.order));
     }
 
-    for entry in sell_orders.into_iter().skip(sell_idx) {
-        let utxo = Utxo::new(entry.order);
-        new_utxos.push(utxo);
+    for utxo in sell_orders.into_iter().skip(sell_idx) {
+        new_utxos.push(Utxo::new(utxo.order));
     }
 
     // Compute new Merkle root from the resulting UTXOs

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {RiscZeroCheats} from "risc0/test/RiscZeroCheats.sol";
@@ -33,13 +33,7 @@ contract OrderBookTest is RiscZeroCheats, Test {
         assetA = new MockERC20("Asset A", "ASTA");
         assetB = new MockERC20("Asset B", "ASTB");
 
-        orderBook = new OrderBook(
-            verifier,
-            boundlessMarket,
-            imageId,
-            IERC20(address(assetA)),
-            IERC20(address(assetB))
-        );
+        orderBook = new OrderBook(verifier, boundlessMarket, imageId, IERC20(address(assetA)), IERC20(address(assetB)));
     }
 
     function test_InitialState() public view {
@@ -47,10 +41,5 @@ contract OrderBookTest is RiscZeroCheats, Test {
         assertEq(orderBook.utxoMerkleRoot(), bytes32(0));
         assertEq(orderBook.assetA(), address(assetA));
         assertEq(orderBook.assetB(), address(assetB));
-    }
-
-    function test_IsUtxoValid() public view {
-        bytes32 randomUtxoId = bytes32(uint256(12345));
-        assertFalse(orderBook.isUtxoValid(randomUtxoId));
     }
 }

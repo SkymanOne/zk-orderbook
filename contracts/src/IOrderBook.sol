@@ -28,9 +28,6 @@ interface IOrderBook {
     /// @notice Get the current UTXO Merkle root
     function utxoMerkleRoot() external view returns (bytes32);
 
-    /// @notice Check if a UTXO is valid (not consumed)
-    function isUtxoValid(bytes32 utxoId) external view returns (bool);
-
     /// @notice Get the AssetA token address
     function assetA() external view returns (address);
 

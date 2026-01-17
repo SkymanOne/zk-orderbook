@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[dev-dependencies]
+risc0-zkvm = { workspace = true, features = ["client"] }
+
 [dependencies]
 alloy = { workspace = true, features = ["sol-types", "signers", "signer-local"] }
 anyhow = { workspace = true }

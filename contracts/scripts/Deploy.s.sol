@@ -13,13 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.26;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {IRiscZeroVerifier} from "risc0/IRiscZeroVerifier.sol";
 import {IERC20} from "openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {OrderBook} from "../src/OrderBook.sol";
 import {MockERC20} from "../src/MockERC20.sol";
+import {ImageID} from "../src/ImageID.sol";
 
 /// @title Deploy - Deploys OrderBook and mock ERC20 tokens for testing
 /// @notice Deploys all contracts and sets up test addresses with token approvals
@@ -35,7 +36,7 @@ contract Deploy is Script {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address verifierAddress = vm.envAddress("VERIFIER_ADDRESS");
         address boundlessMarket = vm.envAddress("BOUNDLESS_MARKET");
-        bytes32 imageId = vm.envBytes32("IMAGE_ID");
+        bytes32 imageId = ImageID.ORDER_BOOK_ID;
 
         // Load demo wallet addresses from env
         address alice = vm.envAddress("ALICE_ADDRESS");
@@ -76,24 +77,20 @@ contract Deploy is Script {
 
         // Deploy OrderBook
         IRiscZeroVerifier verifier = IRiscZeroVerifier(verifierAddress);
-        OrderBook orderBook = new OrderBook(
-            verifier,
-            boundlessMarket,
-            imageId,
-            IERC20(address(assetA)),
-            IERC20(address(assetB))
-        );
+        OrderBook orderBook =
+            new OrderBook(verifier, boundlessMarket, imageId, IERC20(address(assetA)), IERC20(address(assetB)));
 
         console2.log("Deployed OrderBook to", address(orderBook));
         console2.log("  - AssetA:", address(assetA));
         console2.log("  - AssetB:", address(assetB));
         console2.log("  - Verifier:", verifierAddress);
         console2.log("  - BoundlessMarket:", boundlessMarket);
+        console2.logBytes32(imageId);
 
         vm.stopBroadcast();
 
         // Set up infinite approvals for ALICE and BOB
-        _setupTestApprovals(address(orderBook), address(assetA), address(assetB));
+        _setupApprovals(address(orderBook), address(assetA), address(assetB));
 
         console2.log("");
         console2.log("=== Deployment Summary ===");
@@ -104,7 +101,7 @@ contract Deploy is Script {
         console2.log("BOB:", bob);
     }
 
-    function _setupTestApprovals(address orderBook, address assetA, address assetB) internal {
+    function _setupApprovals(address orderBook, address assetA, address assetB) internal {
         // Load test private keys from env
         uint256 aliceKey = vm.envUint("ALICE_PRIVATE_KEY");
         uint256 bobKey = vm.envUint("BOB_PRIVATE_KEY");
@@ -163,7 +160,7 @@ contract DeployLocal is Script {
         // These would typically be deployed by risc0 tooling
         address mockVerifier = vm.envOr("VERIFIER_ADDRESS", address(0x1234));
         address mockBoundlessMarket = vm.envOr("BOUNDLESS_MARKET", address(0x5678));
-        bytes32 mockImageId = vm.envOr("IMAGE_ID", bytes32(uint256(1)));
+        bytes32 mockImageId = ImageID.ORDER_BOOK_ID;
 
         // Deploy OrderBook
         OrderBook orderBook = new OrderBook(

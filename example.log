@@ -1,0 +1,39 @@
+2026-01-17T03:58:55.817558Z  INFO app: Batch size: 10
+2026-01-17T03:58:55.817670Z  INFO app: OrderBook contract: 0x4c4Be21c47435e0a7126eeCD7c70Df9bCF224783
+2026-01-17T03:58:55.917514Z  INFO app: Loaded 0 existing UTXOs
+2026-01-17T03:58:55.918020Z  INFO app: Parsed 8 new orders
+2026-01-17T03:58:55.918027Z  INFO app: Creating Steel EVM environment...
+2026-01-17T03:58:56.317415Z  INFO app: On-chain batch index: 0
+2026-01-17T03:58:56.317499Z  INFO app: On-chain UTXO Merkle root: 0x0000000000000000000000000000000000000000000000000000000000000000
+2026-01-17T03:58:56.317558Z  INFO app: First batch - no existing UTXOs to verify
+2026-01-17T03:58:56.317648Z  INFO app: Preparing proof request for Boundless Market...
+2026-01-17T03:59:21.210009Z  INFO boundless_market::request_builder::preflight_layer: Fetching input from https://gateway.pinata.cloud/ipfs/bafkreicawwxrnrdyg7qhcccxpcmv66tddq6rckzd6u4ewcklgvd4gk2h24
+2026-01-17T03:59:40.258647Z  INFO app: Submitted proof request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916
+2026-01-17T03:59:40.258678Z  INFO app: Waiting for request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 to be fulfilled...
+2026-01-17T03:59:40.389062Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Unknown. Retrying in 10s
+2026-01-17T03:59:50.495593Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Unknown. Retrying in 10s
+2026-01-17T04:00:00.602520Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Unknown. Retrying in 10s
+2026-01-17T04:00:10.766556Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Unknown. Retrying in 10s
+2026-01-17T04:00:20.872150Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Unknown. Retrying in 10s
+2026-01-17T04:00:30.981175Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Unknown. Retrying in 10s
+2026-01-17T04:00:41.092538Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Unknown. Retrying in 10s
+2026-01-17T04:00:51.234751Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Locked. Retrying in 10s
+2026-01-17T04:01:01.418550Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Locked. Retrying in 10s
+2026-01-17T04:01:11.570186Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Locked. Retrying in 10s
+2026-01-17T04:01:21.718340Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Locked. Retrying in 10s
+2026-01-17T04:01:31.864083Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Locked. Retrying in 10s
+2026-01-17T04:01:42.008883Z  INFO boundless_market::contracts::boundless_market: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 status: Locked. Retrying in 10s
+2026-01-17T04:01:52.146646Z  INFO app: Request 9162bcf1fffbe1bd17b698a7aa54bc01ed9bc19d95309916 fulfilled!
+2026-01-17T04:01:52.146724Z  INFO app: === Batch Execution Summary ===
+2026-01-17T04:01:52.146731Z  INFO app: Batch index: 0
+2026-01-17T04:01:52.146735Z  INFO app: Fills executed: 5
+2026-01-17T04:01:52.146739Z  INFO app: New UTXOs created: 3
+2026-01-17T04:01:52.146742Z  INFO app: UTXOs consumed: 0
+2026-01-17T04:01:52.146749Z  INFO app: New UTXO Merkle root: 0x9a8dff5237d80c3ef34e25f29a123b1f50facd9fa62f26e142ee8f42391d1bc0
+2026-01-17T04:01:52.146756Z  INFO app: Fill 0: 0x853e3dC3005b83db47B21d6532F3c5500E970d8F -> 0xf841c5bba73Fa25AE775B0a3a2D816d06B044070 @ 105 for 75 units
+2026-01-17T04:01:52.146811Z  INFO app: Fill 1: 0x853e3dC3005b83db47B21d6532F3c5500E970d8F -> 0xf841c5bba73Fa25AE775B0a3a2D816d06B044070 @ 105 for 25 units
+2026-01-17T04:01:52.146856Z  INFO app: Fill 2: 0x853e3dC3005b83db47B21d6532F3c5500E970d8F -> 0xf841c5bba73Fa25AE775B0a3a2D816d06B044070 @ 103 for 15 units
+2026-01-17T04:01:52.146900Z  INFO app: Fill 3: 0x853e3dC3005b83db47B21d6532F3c5500E970d8F -> 0xf841c5bba73Fa25AE775B0a3a2D816d06B044070 @ 103 for 35 units
+2026-01-17T04:01:52.146943Z  INFO app: Fill 4: 0xf841c5bba73Fa25AE775B0a3a2D816d06B044070 -> 0x853e3dC3005b83db47B21d6532F3c5500E970d8F @ 101 for 60 units
+2026-01-17T04:01:52.147418Z  INFO app: Saved 3 new UTXOs to "utxos.json"
+2026-01-17T04:01:52.147427Z  INFO app: Order book batch processed successfully via Boundless Market!

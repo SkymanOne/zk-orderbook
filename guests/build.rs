@@ -38,9 +38,7 @@ fn main() {
     let guest_options = builder.build().unwrap();
 
     // Generate Rust source files for the methods crate.
-    let guests = embed_methods_with_options(HashMap::from([
-        ("order-book", guest_options),
-    ]));
+    let guests = embed_methods_with_options(HashMap::from([("order-book", guest_options)]));
 
     // Generate Solidity source files for use with Forge.
     let solidity_opts = risc0_build_ethereum::Options::default()
